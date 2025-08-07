@@ -1,0 +1,86 @@
+import pandas as pd
+import re
+
+def standardize_levels(text):
+    """
+    MRI 판독문 내 척추 레벨 표기를 L#/N 형태로 통일
+    """
+    if pd.isna(text):
+        return ''
+    # (L1-2, L1~2, L1/2 등)
+    pattern = re.compile(r"L\s*(\d)\s*[-~/\s]\s*(\d|S1)", re.IGNORECASE)
+    return pattern.sub(lambda m: f"L{m.group(1)}/{m.group(2)}", text)
+
+def segment_texts_by_level(report, levels):
+    """
+    특정 척추 레벨로 시작되는 문장 조각 반환(L2/3 ~ 끝)
+    """
+    return {
+        level: re.findall(rf"{level}[^.:\n]*", report)
+        for level in levels
+    }
+
+def judge_stenosis(segments, severity_true, severity_false, stenosis_keywords, exclude_patterns):
+    """
+    각 레벨별로 협착증 여부 판단
+    """
+    result = {}
+    for level, segs in segments.items():
+        found = False
+        for seg in segs:
+            if any(re.search(pat, seg) for pat in exclude_patterns):
+                continue
+            if re.search(severity_false + r'.*stenosis', seg):
+                continue
+            if any(re.search(severity_true + r'.*' + kw, seg) for kw in stenosis_keywords):
+                found = True
+                break
+        result[level] = found
+    return result
+
+def classify_lumbar_stenosis_alt(report_text):
+    levels = ['L1/2', 'L2/3', 'L3/4', 'L4/5', 'L5/S1']
+    stenosis_keywords = [
+        r'central canal stenosis',
+        r'neural foraminal stenosis|neural foramen stenosis|foraminal stenosis|neural foramen narrowing',
+        r'lateral recess stenosis|subarticular stenosis|subarticular recess stenosis'
+    ]
+    severity_true = r'(moderate|severe|degenerative|grade\s*2|grade\s*3)'
+    severity_false = r'(mild|grade\s*0|grade\s*1)'
+    exclude_patterns = [
+        r'disc (protrusion|extrusion|herniation|bulging)',
+        r'compromise|compression|impingement'
+    ]
+    after_ignore = "영상의학과 전공의 응급판독입니다. 정식 판독시 내용이 바뀔수 있으니 반드시 확인하시기 바랍니다"
+
+    # 전처리
+    text = str(report_text or '').split(after_ignore)[0].lower()
+    text = standardize_levels(text)
+    
+    # 레벨별 segment
+    segments_by_level = segment_texts_by_level(text, levels)
+    # 판정
+    result = judge_stenosis(segments_by_level, severity_true, severity_false, stenosis_keywords, exclude_patterns)
+
+    # need_check 계산
+    cleared_text = text
+    for level in levels:
+        cleared_text = re.sub(level.replace('/', r'[/\- ]'), '', cleared_text, flags=re.IGNORECASE)
+    need_check = bool(
+        re.search(rf'({severity_true} )?(central canal|foraminal|lateral recess|subarticular)[ \w\-]*stenosis', cleared_text)
+    )
+    result['need_check'] = need_check
+    return result
+
+def pack_to_series(res):
+    return pd.Series([res['L1/2'], res['L2/3'], res['L3/4'], res['L4/5'], res['L5/S1'], res['need_check']])
+
+# 엑셀파일 로드
+input_path = "C:/Users/taedo/Downloads/STEN_cohort_SMC_preprocess.xlsx"
+df = pd.read_excel(input_path)
+
+df[['L1/2', 'L2/3', 'L3/4', 'L4/5', 'L5/S1', 'need_check']] = df['검사결과'].fillna('').apply(
+    lambda x: pack_to_series(classify_lumbar_stenosis_alt(x))
+)
+
+print(df[['L1/2', 'L2/3', 'L3/4', 'L4/5', 'L5/S1', 'need_check']].head())
